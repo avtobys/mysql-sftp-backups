@@ -1,0 +1,293 @@
+#!/bin/bash
+
+export SSHPASS='YOU_SFTP_PASS'
+SFTP_USER='SFTP_USER@SFTP_SERVER'
+MAX_BACKUP_FILES=2
+
+SCRIPT_PATH=/root/mysql-sftp-backups
+DIR_BACKUP=/mysql-sftp-backups
+
+LOG_FILE="$SCRIPT_PATH/backup.log"
+MYSQLDUMP_OPTS="--skip-lock-tables --insert-ignore"
+
+IFS=''
+SFTP_RES=''
+CLEAN=0
+
+write_log() {
+    printf '%s %s\n' "$(date --rfc-3339=seconds)" "$1" | tee -a $LOG_FILE
+}
+
+check_available() {
+    SFTP_RES=$(
+    sshpass -e sftp -oBatchMode=no -b - $SFTP_USER <<_EOF_
+   df -h
+   bye
+_EOF_
+    )
+    write_log "${SFTP_RES:=error: sftp server not available}"
+    if [[ "$SFTP_RES" == *"Size"*"Used"*"Avail"* ]]; then
+        return 0
+    fi
+    return 1
+}
+
+check_dir() {
+    SFTP_RES=$(
+    sshpass -e sftp -oBatchMode=no -b - $SFTP_USER <<_EOF_
+   cd $1
+   pwd
+   bye
+_EOF_
+    )
+    write_log "${SFTP_RES:=error: No such directory $1}"
+    if [[ "$SFTP_RES" == *"working directory: $1"* ]]; then
+        write_log "$SFTP_RES"
+        return 0
+    fi
+    write_log "error: No such directory $1"
+    return 1
+}
+
+create_dir() {
+    SFTP_RES=$(
+    sshpass -e sftp -oBatchMode=no -b - $SFTP_USER <<_EOF_
+   mkdir $1
+   bye
+_EOF_
+    )
+    write_log "$SFTP_RES"
+}
+
+rm_old_files() {
+    files=$(echo $1 | grep "^-" | awk '{print $NF}')
+    IFS=$'\n'
+    c=0
+    for file in $files; do
+        ((c++))
+        if (( $c > $MAX_BACKUP_FILES )); then
+            SFTP_RES=$(
+            sshpass -e sftp -oBatchMode=no -b - $SFTP_USER <<_EOF_
+   rm $file
+   bye
+_EOF_
+            )
+            write_log "$SFTP_RES"
+        fi
+    done
+}
+
+rm_file() {
+    SFTP_RES=$(
+            sshpass -e sftp -oBatchMode=no -b - $SFTP_USER <<_EOF_
+   rm $1
+   bye
+_EOF_
+    )
+    write_log "$SFTP_RES"
+}
+
+rm_dir() {
+    SFTP_RES=$(
+            sshpass -e sftp -oBatchMode=no -b - $SFTP_USER <<_EOF_
+   rmdir $1
+   bye
+_EOF_
+    )
+    write_log "$SFTP_RES"
+}
+
+if [[ "$1" == "--help" || "$1" == "-h" || "$1" == "" ]]; then
+    echo "
+    Usage: $SCRIPT_PATH/backup [OPTION]... [DATABASE|FILENAME PATH]...
+
+    Options:                    Description:
+    -h, --help                  display this help and exit
+    -l, --list                  display all saved backups
+    --log                       display log file
+
+    Usage with argument [DATABASE]
+    -c, --create                create backup from database[s...]
+
+    Usage with argument [FILENAME PATH]
+    -r, --restore               restore database from filename path
+
+    Usage CAUTION!!!
+    --clean                     cleaned all backups
+
+    Examlples:
+
+    create backups from 3 databases
+    $SCRIPT_PATH/backup -c database_1 batabase_2 database_3
+    or
+    $SCRIPT_PATH/backup --create database_1 batabase_2 database_3
+    or from crontab command
+    $SCRIPT_PATH/backup --create database_1 batabase_2 database_3 >/dev/null 2>&1
+
+    restore database_1 from sftp backup file
+    $SCRIPT_PATH/backup -r $DIR_BACKUP/database_1/database_1_2021-05-18-06-47-42.sql.gz
+    or
+    $SCRIPT_PATH/backup --restore $DIR_BACKUP/database_1/database_1_2021-05-18-06-47-42.sql.gz
+
+    display list all backups files on ftp server
+    $SCRIPT_PATH/backup -l
+    or
+    $SCRIPT_PATH/backup --list
+    "
+    exit 0
+fi
+
+if [[ "$1" == "--log" ]]; then
+    cat $LOG_FILE
+    exit 0
+fi
+
+if [[ "$1" == "--restore" || "$1" == "-r" ]]; then
+    if [[ -z "$2" ]]; then
+        write_log "error: FILENAME PATH argument that does not exist"
+        exit 1
+    fi
+    SFTP_RES=$($0 --list)
+    restore=$(echo $SFTP_RES | grep " $2$")
+    if [[ -z "$restore" ]]; then
+        write_log "error: backup $2 does not exist"
+        exit 1
+    fi
+    db_name=$(echo $2 | awk -F/ '{print $3}')
+    if [[ -z "$(mysql -NE -e "show databases;" | grep "^${db_name}$")" ]]; then
+        write_log "error: database $db_name not found"
+        exit 1
+    fi
+    cd $SCRIPT_PATH
+    SFTP_RES=$(
+            sshpass -e sftp -oBatchMode=no -b - $SFTP_USER <<_EOF_
+   get $2
+   bye
+_EOF_
+    )
+    write_log "$SFTP_RES"
+    filename=$(echo $2 | awk -F/ '{print $NF}')
+    gunzip -c "$SCRIPT_PATH/$filename" | mysql $db_name
+    rm "$SCRIPT_PATH/$filename"
+    exit 0
+fi
+
+if [[ "$1" == "--clean" ]]; then
+    SFTP_RES=$($0 --list)
+    write_log "$SFTP_RES"
+    files=$(echo $SFTP_RES | grep "^-rw" | awk '{print $NF}')
+    IFS=$'\n'
+    for file in $files; do
+        rm_file $file
+    done
+    SFTP_RES=$($0 --list)
+    write_log "$SFTP_RES"
+    exit 0
+fi
+
+if [[ "$1" == "--list" || "$1" == "-l" ]]; then
+    check_available || exit 1
+    SFTP_RES=$(
+    sshpass -e sftp -oBatchMode=no -b - $SFTP_USER <<_EOF_
+   ls -1t $DIR_BACKUP
+   bye
+_EOF_
+    )
+    printf "\n"
+    db_pathes=$(echo $SFTP_RES | grep "^$DIR_BACKUP")
+    if [[ -z "$db_pathes" ]]; then
+        echo "error: No such db directory"
+        exit 1
+    fi
+    db_names=$(echo $db_pathes | awk -F/ '{print $NF}')
+    if [[ -z "$db_pathes" ]]; then
+        echo "error: No such db names"
+        exit 1
+    fi
+    IFS=$'\n'
+    for db_name in $db_names; do
+        echo "Database: $db_name"
+        IFS=''
+        SFTP_RES=$(
+    sshpass -e sftp -oBatchMode=no -b - $SFTP_USER <<_EOF_
+   ls -lht $DIR_BACKUP/$db_name
+   bye
+_EOF_
+        )
+        echo $SFTP_RES | grep "^-"
+        total=$(echo $SFTP_RES | grep "^-" | wc -l)
+        echo "Total: $total dumps"
+        if (( $total > $MAX_BACKUP_FILES )); then
+            rm_old_files $SFTP_RES
+            elif (( $total == 0 )); then
+            rm_dir "$DIR_BACKUP/$db_name"
+        fi
+        printf "\n"
+    done
+    exit 0
+fi
+
+
+
+
+if [[ "$1" != "--create" && "$1" != "-c" ]]; then
+    write_log "error: OPTION argument that does not exist"
+    exit 1
+fi
+
+if [[ -z "$2" ]]; then
+    write_log "error: DATABASE argument that does not exist"
+    exit 1
+fi
+
+truncate -s 0 $LOG_FILE
+
+SFTP_RES=$($0 --list)
+if [[ "$SFTP_RES" != *"Size"*"Used"*"Avail"* ]]; then
+    write_log "error: sftp server not available"
+    exit 1
+fi
+write_log "$SFTP_RES"
+
+check_dir $DIR_BACKUP || create_dir $DIR_BACKUP
+check_dir $DIR_BACKUP || exit 1
+
+
+DATABASES=()
+count=0
+while [[ $# -gt 0 ]]; do
+    key="$1"
+    ((++count))
+    if (( $count > 1 )); then
+        DATABASES+=("$key")
+    fi
+    shift
+done
+
+for db_name in ${DATABASES[@]} ; do
+    if [[ -z "$(mysql -NE -e "show databases;" | grep "^${db_name}$")" ]]; then
+        write_log "error: database $db_name not found"
+        continue
+    fi
+    check_dir "$DIR_BACKUP/$db_name" || create_dir "$DIR_BACKUP/$db_name"
+    if ! check_dir "$DIR_BACKUP/$db_name"; then
+        write_log "error: No such directory $DIR_BACKUP/$db_name"
+        continue
+    fi
+    backup_file="$db_name"_$(date '+%Y-%m-%d-%H-%M-%S').sql.gz
+    mysqldump --skip-lock-tables --insert-ignore $db_name | gzip > "$SCRIPT_PATH/$backup_file"
+    SFTP_RES=$(
+    sshpass -e sftp -oBatchMode=no -b - $SFTP_USER <<_EOF_
+   cd $DIR_BACKUP/$db_name
+   put $SCRIPT_PATH/$backup_file
+   bye
+_EOF_
+    )
+    write_log "$SFTP_RES"
+    rm "$SCRIPT_PATH/$backup_file"
+done
+
+write_log $($0 -l)
+write_log "Complete!"
+
+exit 0
