@@ -19,7 +19,7 @@ Before first use, go to sftp via console to add RSA key to the list of known hos
     Usage CAUTION!!!
     --clean                     cleaned all backups
 
-    Examlples:
+    Examples:
 
     create backups from 3 databases
     /root/mysql-sftp-backups/backup -c database_1 batabase_2 database_3
