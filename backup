@@ -8,11 +8,9 @@ SCRIPT_PATH=/root/mysql-sftp-backups
 DIR_BACKUP=/mysql-sftp-backups
 
 LOG_FILE="$SCRIPT_PATH/backup.log"
-MYSQLDUMP_OPTS="--skip-lock-tables --insert-ignore"
 
 IFS=''
 SFTP_RES=''
-CLEAN=0
 
 write_log() {
     printf '%s %s\n' "$(date --rfc-3339=seconds)" "$1" | tee -a $LOG_FILE
