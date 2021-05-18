@@ -1,5 +1,7 @@
 
 apt install sshpass
+
+Before first use, go to sftp via console to add RSA key to the list of known hosts
     
     Usage: /root/mysql-sftp-backups/backup [OPTION]... [DATABASE|FILENAME PATH]...
 
